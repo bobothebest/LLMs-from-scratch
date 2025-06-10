@@ -1,3 +1,24 @@
+# 从零开始构建大型语言模型 (中文版教程)
+
+本仓库是 [Build a Large Language Model (From Scratch)] 原始代码的 Fork 版本，致力于整理该书的中文版教程。目前已更新至 **第 4 章第 4 节**，后续内容正在逐步整理中，请持续关注！
+
+> **关于本书**  
+> [*Build a Large Language Model (From Scratch)*] 是一本系统讲解如何从头构建 GPT 类大型语言模型的书籍。从数据预处理、注意力机制到完整 GPT 模型的实现和预训练，书中通过逐步的代码示例和清晰的讲解，帮助读者从零理解 LLM 的核心原理。
+
+## 当前进度
+
+- **已完成内容**：整理到第 4.4 节  
+- **后续计划**：持续更新其他章节内容，敬请期待！
+
+## 如何参与交流
+
+对于本教程有任何问题或建议，欢迎通过以下方式交流讨论：  
+- 在本项目的 [Issues](https://github.com/your-repo/issues) 页面提出问题  
+- 提交 Pull Request 贡献改进内容  
+
+感谢您的关注和支持！希望本教程对大家学习和理解大型语言模型的开发有所帮助。
+
+以下原始库的简介
 # Build a Large Language Model (From Scratch)
 
 This repository contains the code for developing, pretraining, and finetuning a GPT-like LLM and is the official code repository for the book [Build a Large Language Model (From Scratch)](https://amzn.to/4fqvn0D).
