@@ -33,9 +33,21 @@ class MultiHeadAttention(nn.Module):
 
         ####################################################
         # NEW
+
+        self.max_seq_len = max_seq_len or context_length
+        self.window_size = window_size or self.max_seq_len
+        
+        # 把 K，V 加入 buffer
         self.register_buffer("cache_k", None, persistent=False)
         self.register_buffer("cache_v", None, persistent=False)
         self.ptr_current_pos = 0
+        # name："cache_v"
+        # tensor：None
+        # buffer 的初始内容。通常是一个 torch.Tensor，但你这里设为 None，表示初始为空，后续再赋值。
+        # persistent：False
+        # 这个参数是 PyTorch 1.6 之后加的。
+        # 如果为 True（默认），这个 buffer 会被 state_dict() 保存。
+        # 如果为 False，则不会被 state_dict() 保存。通常临时缓存时用这个选项，比如推理时的缓存。
         ####################################################
 
     def forward(self, x, use_cache=False):
@@ -53,6 +65,13 @@ class MultiHeadAttention(nn.Module):
 
         ####################################################
         # NEW
+        # 更新缓冲区中的内容
+        
+        # 如果启用 KV 缓存：
+        # 第一次调用时初始化缓存
+        # 后续调用就把新步的 keys/values 拼接到缓存里
+        # 最后用全缓存作为本次计算的 K/V
+        # 如果不用缓存，就只用这次新生成的。
         if use_cache:
             if self.cache_k is None:
                 self.cache_k, self.cache_v = keys_new, values_new
@@ -74,6 +93,8 @@ class MultiHeadAttention(nn.Module):
 
         ####################################################
         # NEW
+        # 如果用了 KV 缓存，那么要动态地从预先计算好的大 Mask 里切出当前步需要用的 Attention Mask（Bool 类型）。
+        # 切完后更新指针，指向下一步开始的位置。
         num_tokens_Q = queries.shape[-2]
         num_tokens_K = keys.shape[-2]
         if use_cache:
@@ -103,6 +124,8 @@ class MultiHeadAttention(nn.Module):
 
     ####################################################
     # NEW
+    # 当开始一个新的序列生成时，你要“清零”缓存。
+    # 这里是把缓存清空，指针也重置。
     def reset_cache(self):
         self.cache_k, self.cache_v = None, None
         self.ptr_current_pos = 0
@@ -141,9 +164,9 @@ class FeedForward(nn.Module):
     def __init__(self, cfg):
         super().__init__()
         self.layers = nn.Sequential(
-            nn.Linear(cfg["emb_dim"], 4 * cfg["emb_dim"]),
-            GELU(),
-            nn.Linear(4 * cfg["emb_dim"], cfg["emb_dim"]),
+            nn.Linear(cfg["emb_dim"], 4 * cfg["emb_dim"]),#升维
+            GELU(),#激活函数
+            nn.Linear(4 * cfg["emb_dim"], cfg["emb_dim"]),#降维
         )
 
     def forward(self, x):
@@ -173,6 +196,14 @@ class TransformerBlock(nn.Module):
         # x = self.att(x)   # Shape [batch_size, num_tokens, emb_size]
         ####################################################
         # NEW
+        # 作用：
+        # 这里是调用 MultiHeadAttention 的地方。
+        # 改成把 use_cache 参数传进去了。
+
+        # 背景：
+        # 让 TransformerBlock 能区分：
+        # 训练时（use_cache=False）
+        # 推理增量生成时（use_cache=True）
         x = self.att(x, use_cache=use_cache)
         ####################################################
 
@@ -200,6 +231,12 @@ class GPTModel(nn.Module):
         #    *[TransformerBlock(cfg) for _ in range(cfg["n_layers"])])
         ####################################################
         # NEW
+        # 一个是灵活管理所有 TransformerBlock 的“清单”（ModuleList），好让每一层都能用 KV 缓存。
+        # 一个是记录“我现在生成到哪里了”的指针（current_pos），好让位置编码继续对下去。
+        # 把堆叠的 TransformerBlock 改成 ModuleList
+        # 目的是在 forward 里自己循环调用
+        # 可以给每层传 use_cache 参数
+        # 支持增量推理用 KV 缓存
         self.trf_blocks = nn.ModuleList(
             [TransformerBlock(cfg) for _ in range(cfg["n_layers"])])
 
@@ -217,7 +254,13 @@ class GPTModel(nn.Module):
 
         ####################################################
         # NEW
-
+        # 作用：
+        # 位置编码的生成方式加了条件：
+        # 如果增量生成，就从 current_pos 开始编号。
+        # 否则，从 0 开始。
+        # 生成后更新 current_pos。
+        # 背景：
+        # 自回归推理时，每次只进一个新 token，但位置 id 要连续。
         if use_cache:
             pos_ids = torch.arange(self.current_pos, self.current_pos + seq_len, device=in_idx.device, dtype=torch.long)
             self.current_pos += seq_len
@@ -232,6 +275,7 @@ class GPTModel(nn.Module):
         # x = self.trf_blocks(x)
         ####################################################
         # NEW
+        # 这里显式地逐个调用 block，并传入 use_cache。
         for blk in self.trf_blocks:
             x = blk(x, use_cache=use_cache)
         ####################################################
@@ -242,6 +286,12 @@ class GPTModel(nn.Module):
 
     ####################################################
     # NEW
+    # 作用：
+    # 给模型加了个“清空所有缓存”的接口。
+    # 会调用所有 Attention 层的 reset_cache。
+    # 也重置位置指针。
+    # 背景：
+    # 新的生成请求开始前要调用这个。
     def reset_kv_cache(self):
         for blk in self.trf_blocks:
             blk.att.reset_cache()
@@ -277,6 +327,7 @@ def generate_text_simple(model, idx, max_new_tokens, context_size):
 
 ####################################################
 # NEW
+# 新增了一个专门的文本生成函数，用于支持“缓存生成”。
 def generate_text_simple_cached(model, idx, max_new_tokens,
                                 context_size=None, use_cache=True):
     model.eval()
@@ -285,8 +336,9 @@ def generate_text_simple_cached(model, idx, max_new_tokens,
     with torch.no_grad():
         if use_cache:
             # Init cache with full prompt
-            model.reset_kv_cache()
-            logits = model(idx[:, -ctx_len:], use_cache=True)
+            model.reset_kv_cache()# 清空模型里所有 Transformer 层的 KV 缓存
+            logits = model(idx[:, -ctx_len:], use_cache=True)# 首次把 整个上下文送进模型，模型内部会把所有的 Key/Value 缓存起来，返回 logits
+            # 后续的每次迭代，只把新 token 送进去，模型会自动从缓存里取出对应的 Key/Value 来计算注意力。
 
             for _ in range(max_new_tokens):
                 # a) pick the token with the highest log-probability (greedy sampling)
@@ -295,7 +347,7 @@ def generate_text_simple_cached(model, idx, max_new_tokens,
                 idx = torch.cat([idx, next_idx], dim=1)
                 # c) feed model only the new token
                 logits = model(next_idx, use_cache=True)
-        else:
+        else:#如果 use_cache=False，和最原始版本一模一样，每次都用全上下文去推理
             for _ in range(max_new_tokens):
                 logits = model(idx[:, -ctx_len:], use_cache=False)
                 next_idx = logits[:, -1].argmax(dim=-1, keepdim=True)
@@ -346,6 +398,7 @@ def main():
 
     ####################################################
     # NEW
+    # 把主函数里的调用换成了使用缓存版本的生成。
     token_ids = generate_text_simple_cached(
         model=model,
         idx=encoded_tensor,

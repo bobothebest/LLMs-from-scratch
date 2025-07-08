@@ -12,6 +12,7 @@ import torch.nn as nn
 # Chapter 3
 #####################################
 class MultiHeadAttention(nn.Module):
+    # 加了 max_seq_len 和 window_size 参数
     def __init__(self, d_in, d_out, context_length, dropout, num_heads, qkv_bias=False, max_seq_len=None, window_size=None):
         super().__init__()
         assert d_out % num_heads == 0, "d_out must be divisible by num_heads"
@@ -28,6 +29,7 @@ class MultiHeadAttention(nn.Module):
 
         ####################################################
         # NEW
+        # 定义 max_seq_len 和 window_size
         self.max_seq_len = max_seq_len or context_length
         self.window_size = window_size or self.max_seq_len
         self.register_buffer("cache_k", None, persistent=False)
@@ -54,7 +56,9 @@ class MultiHeadAttention(nn.Module):
 
         ####################################################
         # NEW
+        # 维护一个滑动窗口缓存过去的 key/value
         if use_cache:
+            # 如果缓存为空，或者缓存的大小不等于 batch size，则初始化缓存
             if self.cache_k is None or self.cache_k.size(0) != b:
                 self.cache_k = torch.zeros(b, self.num_heads,
                                            self.window_size, self.head_dim,
@@ -63,13 +67,15 @@ class MultiHeadAttention(nn.Module):
                 self.ptr_cur = 0  # pointer to next free slot
 
             # if incoming chunk would overflow discard oldest tokens
+            # 如果缓存的大小不足以容纳新 token，则丢弃最旧的 token
             if self.ptr_cur + num_tokens > self.window_size:
                 overflow = self.ptr_cur + num_tokens - self.window_size
                 # shift everything left by `overflow` (cheap view-copy)
                 self.cache_k[:, :, :-overflow, :] = self.cache_k[:, :, overflow:, :].clone()
                 self.cache_v[:, :, :-overflow, :] = self.cache_v[:, :, overflow:, :].clone()
                 self.ptr_cur -= overflow  # pointer after shift
-
+            
+            # 将新 token 添加到缓存中
             self.cache_k[:, :, self.ptr_cur:self.ptr_cur + num_tokens, :] = keys_new
             self.cache_v[:, :, self.ptr_cur:self.ptr_cur + num_tokens, :] = values_new
             self.ptr_cur += num_tokens
@@ -77,6 +83,7 @@ class MultiHeadAttention(nn.Module):
             keys = self.cache_k[:, :, :self.ptr_cur, :]
             values = self.cache_v[:, :, :self.ptr_cur, :]
         else:
+            # 如果 use_cache=False，则不使用缓存，直接使用新的 key/value
             keys, values = keys_new, values_new
             self.ptr_cur = 0  # keep pointer sane if you interleave modes
         ####################################################
@@ -85,11 +92,13 @@ class MultiHeadAttention(nn.Module):
 
         ####################################################
         # NEW
+        # 计算注意力分数
         K = attn_scores.size(-1)
-
+        # 如果没有缓存（即当前的 token 数等于总可见数），用普通的上三角掩码——确保第 i 个 token 只能看见自己和之前的 token。
         if num_tokens == K:
             # No cache → use the pre‑baked triangular mask slice
             causal_mask = torch.triu(torch.ones(num_tokens, K, device=x.device, dtype=torch.bool), diagonal=1)
+        # 如果缓存不为空（即当前的 token 数小于总可见数），则需要偏移对角线——确保第 i 个 token 只能看见自己和之前的 token。
         else:
             # Cached: need to offset the diagonal by (K − num_tokens)
             offset = K - num_tokens  # number of tokens already in cache before this chunk
@@ -172,7 +181,7 @@ class TransformerBlock(nn.Module):
             dropout=cfg["drop_rate"],
             qkv_bias=cfg["qkv_bias"],
             window_size=cfg["kv_window_size"] if "kv_window_size" in cfg else cfg["context_length"]   # NEW
-        )
+        )#如果你的 cfg 里有 "kv_window_size" 这个字段，就用它做窗口大小；如果没有，就回退用 context_length，也就是默认能看见全部 context。
         self.ff = FeedForward(cfg)
         self.norm1 = LayerNorm(cfg["emb_dim"])
         self.norm2 = LayerNorm(cfg["emb_dim"])

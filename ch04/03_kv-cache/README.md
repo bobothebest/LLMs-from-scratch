@@ -241,6 +241,14 @@ As sequence length increases, the benefits and downsides of a KV cache become mo
 
 - [Bad] **Memory usage increases linearly**: Each new token appends to the KV cache. For long sequences and larger LLMs, the cumulative KV cache grows larger, which can consume a significant or even prohibitive amount of (GPU) memory. As a workaround, we can truncate the KV cache, but this adds even more complexity (but again, it may well be worth it when deploying LLMs.)
 
+## KV缓存的优点和缺点
+
+随着序列长度的增加，KV缓存的好处和弊端会在以下方面变得更加明显：
+
+- [好处] **计算效率提升**：在没有缓存的情况下，第*t*步的注意力机制必须将新查询与之前的*t*个键进行比较，因此累积工作量呈二次方增长，O(n²)。有了缓存，每个键和值只需计算一次然后重复使用，将每步的总复杂度降低到线性，O(n)。
+
+- [坏处] **内存使用呈线性增长**：每个新标记都会追加到KV缓存中。对于长序列和大型LLM，累积的KV缓存会变得越来越大，这可能会消耗大量甚至是令人望而却步的（GPU）内存。作为解决方法，我们可以截断KV缓存，但这会增加更多复杂性（不过，在部署LLM时这样做可能仍然是值得的）。
+
 
 
 &nbsp;
@@ -255,10 +263,20 @@ While my conceptual implementation of a KV cache above helps with clarity and is
 
 - **Linear growth in memory usage**: Without proper handling, the KV cache size becomes impractical for very long sequences.
 
+### 缓存扩展时的常见陷阱
+
+- **内存碎片化和重复分配**：如前所示，通过`torch.cat`连续拼接张量会导致性能瓶颈，因为需要频繁的内存分配和重新分配。
+
+- **内存使用的线性增长**：如果没有适当处理，KV缓存的大小对于非常长的序列来说会变得不切实际。
+
 &nbsp;
 #### Tip 1: Pre-allocate Memory
 
 Rather than concatenating tensors repeatedly, we could pre-allocate a sufficiently large tensor based on the expected maximum sequence length. This ensures consistent memory use and reduces overhead. In pseudo-code, this may look like as follows:
+
+#### 技巧1：预分配内存
+
+与其重复拼接张量，我们可以基于预期的最大序列长度预先分配一个足够大的张量。这确保了一致的内存使用并减少了开销。在伪代码中，这可能看起来如下所示：
 
 ```python
 # Example pre-allocation for keys and values
@@ -274,6 +292,9 @@ During inference, we can then simply write into slices of these pre-allocated te
 
 To avoid blowing up our GPU memory, we can implement a sliding window approach with dynamic truncation. Via the sliding window, we maintain only the last `window_size` tokens in the cache:
 
+#### 技巧2：通过滑动窗口截断缓存
+
+为了避免GPU内存爆炸，我们可以实现一个带有动态截断的滑动窗口方法。通过滑动窗口，我们只在缓存中保留最后`window_size`个 token：
 
 ```python
 # Sliding window cache implementation
