@@ -15,10 +15,11 @@ from llms_from_scratch.qwen3 import (
 from llms_from_scratch.kv_cache.qwen3 import Qwen3Model as Qwen3ModelKV
 from llms_from_scratch.kv_cache.generate import generate_text_simple as generate_text_simple_cached
 
+from llms_from_scratch.kv_cache_batched.qwen3 import Qwen3Model as Qwen3ModelKVBatched
+from llms_from_scratch.kv_cache_batched.generate import generate_text_simple as generate_text_simple_batched
 
 import importlib
 import pytest
-import tiktoken
 import torch
 import torch.nn as nn
 
@@ -102,8 +103,8 @@ def test_rope():
 
 @pytest.fixture(scope="session")
 def qwen3_weights_path(tmp_path_factory):
-    """Creates and saves a deterministic Llama3 model for testing."""
-    path = tmp_path_factory.mktemp("models") / "llama3_test_weights.pt"
+    """Creates and saves a deterministic model for testing."""
+    path = tmp_path_factory.mktemp("models") / "qwen3_test_weights.pt"
 
     if not path.exists():
         torch.manual_seed(123)
@@ -114,7 +115,7 @@ def qwen3_weights_path(tmp_path_factory):
 
 
 @pytest.mark.parametrize("ModelClass", [Qwen3Model, Qwen3ModelKV])
-@pytest.mark.parametrize("generate_fn", [generate_text_simple, generate_text_simple_cached])
+@pytest.mark.parametrize("generate_fn", [generate_text_simple])
 def test_model_variants(ModelClass, qwen3_weights_path, generate_fn):
 
     torch.manual_seed(123)
@@ -122,28 +123,139 @@ def test_model_variants(ModelClass, qwen3_weights_path, generate_fn):
     model.load_state_dict(torch.load(qwen3_weights_path))
     model.eval()
 
-    start_context = "Llamas eat"
+    tokenizer = Qwen3Tokenizer(
+        tokenizer_file_path="tokenizer-base.json",
+        repo_id="rasbt/qwen3-from-scratch",
+        add_generation_prompt=False,
+        add_thinking=False
+    )
 
-    tokenizer = tiktoken.get_encoding("gpt2")
-    encoded = tokenizer.encode(start_context)
-    encoded_tensor = torch.tensor(encoded).unsqueeze(0)
+    prompt = "Give me a short introduction to large language models."
+    input_token_ids = tokenizer.encode(prompt)
+    input_token_ids = torch.tensor([input_token_ids])
 
     print(f"\n{50*'='}\n{22*' '}IN\n{50*'='}")
-    print("\nInput text:", start_context)
-    print("Encoded input text:", encoded)
-    print("encoded_tensor.shape:", encoded_tensor.shape)
+    print("\nInput text:", prompt)
+    print("Encoded input text:", input_token_ids)
+    print("encoded_tensor.shape:", input_token_ids.shape)
 
-    out = generate_text_simple(
+    out = generate_fn(
         model=model,
-        idx=encoded_tensor,
+        idx=input_token_ids,
         max_new_tokens=5,
         context_size=QWEN_CONFIG_06_B["context_length"]
     )
     print("Encoded output text:", out)
     expect = torch.tensor([
-        [43, 2543, 292, 4483, 115206, 459, 43010, 104223, 55553]
+        [151644, 872, 198, 35127, 752, 264, 2805, 16800, 311,
+         3460, 4128,  4119, 13, 151645, 198, 112120, 83942, 60483,
+         102652, 7414]
     ])
     assert torch.equal(expect, out)
+
+
+def test_model_KV_noKV(qwen3_weights_path):
+
+    torch.manual_seed(123)
+    model_KV = Qwen3ModelKV(QWEN_CONFIG_06_B)
+    model_KV.load_state_dict(torch.load(qwen3_weights_path))
+    model_KV.eval()
+
+    tokenizer = Qwen3Tokenizer(
+        tokenizer_file_path="tokenizer-base.json",
+        repo_id="rasbt/qwen3-from-scratch",
+        add_generation_prompt=False,
+        add_thinking=False
+    )
+
+    prompt = "Give me a short introduction to large language models."
+    input_token_ids = tokenizer.encode(prompt)
+    input_token_ids = torch.tensor([input_token_ids])
+
+    out_KV = generate_text_simple_cached(
+        model=model_KV,
+        idx=input_token_ids,
+        max_new_tokens=5,
+        context_size=QWEN_CONFIG_06_B["context_length"]
+    )
+    del model_KV
+
+    torch.manual_seed(123)
+    model_noKV = Qwen3Model(QWEN_CONFIG_06_B)
+    model_noKV.load_state_dict(torch.load(qwen3_weights_path))
+    model_noKV.eval()
+
+    out_noKV = generate_text_simple(
+        model=model_noKV,
+        idx=input_token_ids,
+        max_new_tokens=5,
+        context_size=QWEN_CONFIG_06_B["context_length"]
+    )
+
+    assert torch.equal(out_noKV, out_KV)
+
+
+def test_model_batched_KV(qwen3_weights_path):
+
+    torch.manual_seed(123)
+    model_KV = Qwen3ModelKV(QWEN_CONFIG_06_B)
+    model_KV.load_state_dict(torch.load(qwen3_weights_path))
+    model_KV.eval()
+
+    tokenizer = Qwen3Tokenizer(
+        tokenizer_file_path="tokenizer-base.json",
+        repo_id="rasbt/qwen3-from-scratch",
+        add_generation_prompt=False,
+        add_thinking=False
+    )
+
+    # Batch size 1
+
+    prompt = "Give me a short introduction to large language models."
+    input_token_ids = tokenizer.encode(prompt)
+    input_token_ids = torch.tensor([input_token_ids])
+
+    out_KV = generate_text_simple_cached(
+        model=model_KV,
+        idx=input_token_ids,
+        max_new_tokens=5,
+        context_size=QWEN_CONFIG_06_B["context_length"]
+    )
+    del model_KV
+
+    torch.manual_seed(123)
+    model_KV_batched = Qwen3ModelKVBatched(QWEN_CONFIG_06_B)
+    model_KV_batched.load_state_dict(torch.load(qwen3_weights_path))
+    model_KV_batched.eval()
+
+    out_KV_bs_1 = generate_text_simple_batched(
+        model=model_KV_batched,
+        idx=input_token_ids,
+        max_new_tokens=5,
+        context_size=QWEN_CONFIG_06_B["context_length"]
+    )
+
+    assert torch.equal(out_KV, out_KV_bs_1)
+
+    # Batch size 2
+
+    prompts = [
+        "Give me a short introduction to large language models.",
+        "Give me a short introduction to large language models."
+    ]
+    tokenized_prompts = [tokenizer.encode(p) for p in prompts]
+    max_len = max(len(t) for t in tokenized_prompts)
+    padded_token_ids = [
+        t + [tokenizer.pad_token_id] * (max_len - len(t)) for t in tokenized_prompts
+    ]
+    input_tensor = torch.tensor(padded_token_ids)
+    out_KV_bs_2 = generate_text_simple_batched(
+        model=model_KV_batched,
+        idx=input_tensor,
+        max_new_tokens=5,
+        context_size=QWEN_CONFIG_06_B["context_length"],
+    )
+    assert torch.equal(out_KV.squeeze(0), out_KV_bs_2[0]), (out_KV.squeeze(0).shape, out_KV_bs_2[0].shape)
 
 
 def test_rmsnorm_equivalence():
@@ -171,12 +283,15 @@ def test_rmsnorm_equivalence():
 @pytest.mark.skipif(not transformers_installed, reason="transformers not installed")
 def test_tokenizer_equivalence():
     from transformers import AutoTokenizer
-    repo_id = "Qwen/Qwen3-0.6B"
-    tokenizer_ref = AutoTokenizer.from_pretrained(repo_id)
+
     prompt = "Give me a short introduction to large language models."
     messages = [
         {"role": "user", "content": prompt},
     ]
+
+    # Reasoning model tokenizer
+    repo_id = "Qwen/Qwen3-0.6B"
+    tokenizer_ref = AutoTokenizer.from_pretrained(repo_id)
 
     for states in ((True, True), (False, False)):
         tokenizer = Qwen3Tokenizer(
@@ -197,3 +312,41 @@ def test_tokenizer_equivalence():
         output_text = tokenizer.decode(input_token_ids)
         out_text_ref = tokenizer_ref.decode(input_token_ids_ref)
         assert output_text == out_text_ref, states
+
+        assert tokenizer_ref.eos_token_id == tokenizer.eos_token_id
+        assert tokenizer_ref.pad_token_id == tokenizer.pad_token_id
+
+    # Base model tokenizer
+    repo_id = "Qwen/Qwen3-0.6B-Base"
+    tokenizer_ref = AutoTokenizer.from_pretrained(repo_id)
+
+    for states in ((True, True), (False, False)):
+        tokenizer = Qwen3Tokenizer(
+            tokenizer_file_path="Qwen3-0.6B-Base/tokenizer.json",
+            repo_id=repo_id,
+            add_generation_prompt=states[0],
+            add_thinking=states[1]
+        )
+        input_token_ids = tokenizer.encode(prompt)
+        input_token_ids_ref = tokenizer_ref.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=states[0],
+            enable_thinking=states[1],
+        )
+        assert input_token_ids == input_token_ids_ref, states
+
+        output_text = tokenizer.decode(input_token_ids)
+        out_text_ref = tokenizer_ref.decode(input_token_ids_ref)
+        assert output_text == out_text_ref, states
+
+        assert tokenizer_ref.eos_token_id == tokenizer.eos_token_id
+        assert tokenizer_ref.pad_token_id == tokenizer.pad_token_id
+
+        assert tokenizer.encode("<|endoftext|>") == [tokenizer._special_to_id["<|endoftext|>"]]
+        assert tokenizer.encode("<|im_end|>") == [tokenizer._special_to_id["<|im_end|>"]]
+
+        expected_eos_token = "<|im_end|>" if "Base" not in repo_id else "<|endoftext|>"
+        expected_pad_token = "<|endoftext|>"
+        assert tokenizer.decode([tokenizer.eos_token_id]) == expected_eos_token
+        assert tokenizer.decode([tokenizer.pad_token_id]) == expected_pad_token
