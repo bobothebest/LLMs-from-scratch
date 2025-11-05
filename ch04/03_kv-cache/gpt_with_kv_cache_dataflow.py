@@ -46,7 +46,7 @@ class MultiHeadAttention(nn.Module):
         # 如果为 False，则不会被 state_dict() 保存。通常临时缓存时用这个选项，比如推理时的缓存。
         ####################################################
 
-    def forward(self, x, use_cache=False):
+    def forward(self, x, use_cache=False, verbose=False):
         b, num_tokens, d_in = x.shape
 
         keys_new = self.W_key(x)  # Shape: (b, num_tokens, d_out)
@@ -58,6 +58,9 @@ class MultiHeadAttention(nn.Module):
         keys_new = keys_new.view(b, num_tokens, self.num_heads, self.head_dim)
         values_new = values_new.view(b, num_tokens, self.num_heads, self.head_dim)
         queries = queries.view(b, num_tokens, self.num_heads, self.head_dim)
+
+        if verbose:
+            print(f"[MHA] 新 keys_new: {keys_new.shape}, values_new: {values_new.shape}, queries: {queries.shape}")
 
         ####################################################
         # NEW
@@ -75,14 +78,20 @@ class MultiHeadAttention(nn.Module):
                 self.cache_k = torch.cat([self.cache_k, keys_new], dim=1)
                 self.cache_v = torch.cat([self.cache_v, values_new], dim=1)
             keys, values = self.cache_k, self.cache_v
+            if verbose:
+                print(f"[MHA] cache_k: {self.cache_k.shape}, cache_v: {self.cache_v.shape}")
         else:
             keys, values = keys_new, values_new
-        ####################################################
+        if verbose:
+            print(f"[MHA] 用于 attention 的 keys: {keys.shape}, values: {values.shape}")
 
         # Transpose: (b, num_tokens, num_heads, head_dim) -> (b, num_heads, num_tokens, head_dim)
         keys = keys.transpose(1, 2)
         queries = queries.transpose(1, 2)
         values = values.transpose(1, 2)
+
+        if verbose:
+            print(f"[MHA] transpose 后 queries: {queries.shape}, keys: {keys.shape}, values: {values.shape}")
 
         # Compute scaled dot-product attention (aka self-attention) with a causal mask
         attn_scores = queries @ keys.transpose(2, 3)  # Dot product for each head
@@ -106,6 +115,14 @@ class MultiHeadAttention(nn.Module):
         # Use the mask to fill attention scores
         attn_scores.masked_fill_(mask_bool, -torch.inf)
 
+        if verbose:
+            print(f"[MHA] attn_scores: {attn_scores.shape}")
+            # 计算节省的量：
+            if use_cache:
+                print(f"[MHA] 本轮只计算了 {num_tokens_Q} x {num_tokens_K} 的 attention（Q x K），而不用缓存时会是 {num_tokens_Q} x {num_tokens_Q}")
+            else:
+                print(f"[MHA] 计算了 {num_tokens_Q} x {num_tokens_K} 的 attention（Q x K）")
+
         attn_weights = torch.softmax(attn_scores / keys.shape[-1]**0.5, dim=-1)
         attn_weights = self.dropout(attn_weights)
 
@@ -115,6 +132,9 @@ class MultiHeadAttention(nn.Module):
         # Combine heads, where self.d_out = self.num_heads * self.head_dim
         context_vec = context_vec.contiguous().view(b, num_tokens, self.d_out)
         context_vec = self.out_proj(context_vec)  # optional projection
+
+        if verbose:
+            print(f"[MHA] context_vec: {context_vec.shape}")
 
         return context_vec
 
@@ -184,25 +204,13 @@ class TransformerBlock(nn.Module):
         self.norm2 = LayerNorm(cfg["emb_dim"])
         self.drop_shortcut = nn.Dropout(cfg["drop_rate"])
 
-    def forward(self, x, use_cache=False):
+    def forward(self, x, use_cache=False, verbose=False):
+        if verbose: print(f"[TransformerBlock] 输入: {x.shape}")
         # Shortcut connection for attention block
         shortcut = x
         x = self.norm1(x)
 
-        # x = self.att(x)   # Shape [batch_size, num_tokens, emb_size]
-        ####################################################
-        # NEW
-        # 作用：
-        # 这里是调用 MultiHeadAttention 的地方。
-        # 改成把 use_cache 参数传进去了。
-
-        # 背景：
-        # 让 TransformerBlock 能区分：
-        # 训练时（use_cache=False）
-        # 推理增量生成时（use_cache=True）
-        x = self.att(x, use_cache=use_cache)
-        ####################################################
-
+        x = self.att(x, use_cache=use_cache, verbose=verbose)
         x = self.drop_shortcut(x)
         x = x + shortcut  # Add the original input back
 
@@ -213,6 +221,7 @@ class TransformerBlock(nn.Module):
         x = self.drop_shortcut(x)
         x = x + shortcut  # Add the original input back
 
+        if verbose: print(f"[TransformerBlock] 输出: {x.shape}")
         return x
 
 
@@ -242,7 +251,8 @@ class GPTModel(nn.Module):
         self.final_norm = LayerNorm(cfg["emb_dim"])
         self.out_head = nn.Linear(cfg["emb_dim"], cfg["vocab_size"], bias=False)
 
-    def forward(self, in_idx, use_cache=False):
+    def forward(self, in_idx, use_cache=False, verbose=False):
+        if verbose: print(f"[GPTModel] 输入 in_idx: {in_idx.shape}")
         batch_size, seq_len = in_idx.shape
         tok_embeds = self.tok_emb(in_idx)
 
@@ -273,11 +283,12 @@ class GPTModel(nn.Module):
         # NEW
         # 这里显式地逐个调用 block，并传入 use_cache。
         for blk in self.trf_blocks:
-            x = blk(x, use_cache=use_cache)
+            x = blk(x, use_cache=use_cache, verbose=verbose)
         ####################################################
 
         x = self.final_norm(x)
         logits = self.out_head(x)
+        if verbose: print(f"[GPTModel] 输出 logits: {logits.shape}")
         return logits
 
     ####################################################
@@ -333,22 +344,35 @@ def generate_text_simple_cached(model, idx, max_new_tokens,
         if use_cache:
             # Init cache with full prompt
             model.reset_kv_cache()# 清空模型里所有 Transformer 层的 KV 缓存
-            logits = model(idx[:, -ctx_len:], use_cache=True)# 首次把 整个上下文送进模型，模型内部会把所有的 Key/Value 缓存起来，返回 logits
+            logits = model(idx[:, -ctx_len:], use_cache=True, verbose=False)
             # 后续的每次迭代，只把新 token 送进去，模型会自动从缓存里取出对应的 Key/Value 来计算注意力。
-
-            for _ in range(max_new_tokens):
+            for i in range(max_new_tokens):
                 # a) pick the token with the highest log-probability (greedy sampling)
                 next_idx = logits[:, -1].argmax(dim=-1, keepdim=True)
                 # b) append it to the running sequence
                 idx = torch.cat([idx, next_idx], dim=1)
                 # c) feed model only the new token
-                logits = model(next_idx, use_cache=True)
+                verbose = (i == max_new_tokens - 1)
+                logits = model(next_idx, use_cache=True, verbose=verbose)
+
+                # 打印第一轮和第二轮的前三层KV内容和token
+                if i in [0, 1]:
+                    print(f"\n{'='*20} 第{i+1}轮生成后，token序列: {idx.tolist()} {'='*20}")
+                    for layer in range(3):
+                        attn = model.trf_blocks[layer].att
+                        print(f"[第{layer+1}层] cache_k.shape: {None if attn.cache_k is None else attn.cache_k.shape}")
+                        print(f"[第{layer+1}层] cache_v.shape: {None if attn.cache_v is None else attn.cache_v.shape}")
+                        # 打印部分数值，防止太长
+                        if attn.cache_k is not None:
+                            print(f"[第{layer+1}层] cache_k[0, :, 0, :4]:\n{attn.cache_k[0, :, 0, :4].cpu().numpy()}")
+                        if attn.cache_v is not None:
+                            print(f"[第{layer+1}层] cache_v[0, :, 0, :4]:\n{attn.cache_v[0, :, 0, :4].cpu().numpy()}")
         else:#如果 use_cache=False，和最原始版本一模一样，每次都用全上下文去推理
-            for _ in range(max_new_tokens):
-                logits = model(idx[:, -ctx_len:], use_cache=False)
+            for i in range(max_new_tokens):
+                verbose = (i == max_new_tokens - 1)
+                logits = model(idx[:, -ctx_len:], use_cache=False, verbose=verbose)
                 next_idx = logits[:, -1].argmax(dim=-1, keepdim=True)
                 idx = torch.cat([idx, next_idx], dim=1)
-
     return idx
 ####################################################
 
@@ -398,7 +422,8 @@ def main():
     token_ids = generate_text_simple_cached(
         model=model,
         idx=encoded_tensor,
-        max_new_tokens=200,
+        max_new_tokens=20,
+        #max_new_tokens=200,
     )
     ####################################################
 
